@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+export TTYDM_SPAWN=yes
+
+source "$HOME/.config/ttydm/rc.sh"
+# Default options
+ttydm_maintitle=${ttydm_maintitle:-"\Zb$HOSTNAME\Zn main entrance - "`date +"%A %-d %B %Y"`}
+ttydm_current_terminal=${ttydm_current_terminal:-`tty`}
+ttydm_dialogrc=${ttydm_dialogrc:-}
+
+
+if [ -z "${ttydm_sessions[*]}" ] || [ -z "${ttydm_sessions_names[*]}" ]; then
+    echo "Required variables ttydm_sessions and ttydm_sessions_names not defined."
+    exit 1
+fi
+
+
+if [ "$ttydm_current_terminal" != "/dev/tty1" ]; then
+    if ! DIALOGRC=${ttydm_dialogrc} dialog  --colors \
+        --backtitle "$ttydm_maintitle" --defaultno \
+        --yesno "You're not running on /dev/tty1 but ${ttydm_current_terminal} you fool.\n\nAre you crazy or sure of what you're doing?" 0 0
+    then
+        exit 1
+    fi
+fi
+
+
+TTYDM_CHOICES=()
+for ((count = 0; count < ${#ttydm_sessions_names[@]}; count++)); do
+    TTYDM_CHOICES=("${TTYDM_CHOICES[@]}" "${ttydm_sessions[${count}]}" "${ttydm_sessions_names[${count}]}")
+done
+
+
+TTYDM_DEST=logout
+if DIALOGRC=${ttydm_dialogrc} dialog --colors \
+    --backtitle "$ttydm_maintitle" --title "welcome $USER" \
+    --ok-label ' Select ' --cancel-label ' Logout ' \
+    --menu 'what do you want to do today?' 0 0 0 \
+    "${TTYDM_CHOICES[@]}" 2> ~/.config/ttydm/last_choice
+then
+    chmod go-rwx ~/.config/ttydm/last_choice
+    TTYDM_DEST=`cat ~/.config/ttydm/last_choice`
+fi
+
+
+ttydm_menu "$TTYDM_DEST"
