@@ -1,18 +1,39 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 
 export TTYDM_SPAWN=yes
 
-source "$HOME/.config/ttydm/rc.sh"
+[ ! -d "$HOME/.config/ttydm" ] && mkdir -p "$HOME/.config/ttydm"
+
+ttydm_current_terminal=`tty`
+
+
 # Default options
-ttydm_maintitle=${ttydm_maintitle:-"\Zb$HOSTNAME\Zn main entrance - "`date +"%A %-d %B %Y"`}
-ttydm_current_terminal=${ttydm_current_terminal:-`tty`}
-ttydm_dialogrc=${ttydm_dialogrc:-}
+ttydm_maintitle="\Zb$HOSTNAME\Zn main entrance - "`date +"%A %-d %B %Y"`
+ttydm_vt="vt${ttydm_current_terminal#/dev/tty}"
+ttydm_dialogrc=
+ttydm_run_xwrapper=yes
+ttydm_startxlog=/dev/null
+
+declare -a ttydm_sessions ttydm_sessions_exec ttydm_sessions_desc
+for desktopfile in $(\ls -1 /usr/share/xsessions); do
+    [ "${desktopfile:0:1}" = '.' -o "${desktopfile: -8}" != '.desktop' ] && continue
+    session_name=$(sed -n "s/^Name=\(.*\)/\1/p" "/usr/share/xsessions/$desktopfile")
+    session_exec=$(sed -n "s/^Exec=\(.*\)/\1/p" "/usr/share/xsessions/$desktopfile")
+    session_desc=$(sed -n "s/^Comment=\(.*\)/\1/p" "/usr/share/xsessions/$desktopfile")
+    ttydm_sessions=( "${ttydm_sessions[@]}" "$session_name" )
+    ttydm_sessions_exec=("${ttydm_sessions_exec[@]}" "$session_exec")
+    ttydm_sessions_desc=("${ttydm_sessions_desc[@]}" "$session_desc")
+done
+ttydm_sessions=("${ttydm_sessions[@]}" "Terminal")
+ttydm_sessions_exec=("${ttydm_sessions_exec[@]}" tty)
+ttydm_sessions_desc=("${ttydm_sessions_desc[@]}" "feeling nerdy…")
 
 
-if [ -z "${ttydm_sessions[*]}" ] || [ -z "${ttydm_sessions_names[*]}" ]; then
-    echo "Required variables ttydm_sessions and ttydm_sessions_names not defined."
-    exit 1
-fi
+# Overwrite default options if necessary
+[ -f "$HOME/.config/ttydm/rc.sh" ] && . "$HOME/.config/ttydm/rc.sh"
+
+[ "$ttydm_startxlog" != /dev/null -a -f "$ttydm_startxlog" ] && \
+    cp "$ttydm_startxlog" "${ttydm_startxlog}.0"
 
 
 if [ "$ttydm_current_terminal" != "/dev/tty1" ]; then
@@ -25,22 +46,68 @@ if [ "$ttydm_current_terminal" != "/dev/tty1" ]; then
 fi
 
 
-TTYDM_CHOICES=()
-for ((count = 0; count < ${#ttydm_sessions_names[@]}; count++)); do
-    TTYDM_CHOICES=("${TTYDM_CHOICES[@]}" "${ttydm_sessions[${count}]}" "${ttydm_sessions_names[${count}]}")
+declare -a TTYDM_CHOICES
+for ((count = 0; count < ${#ttydm_sessions[@]}; count++)); do
+    TTYDM_CHOICES=("${TTYDM_CHOICES[@]}" "$count" "${ttydm_sessions[${count}]} (${ttydm_sessions_desc[${count}]})")
 done
 
 
-TTYDM_DEST=logout
-if DIALOGRC=${ttydm_dialogrc} dialog --colors \
-    --backtitle "$ttydm_maintitle" --title "welcome $USER" \
-    --ok-label ' Select ' --cancel-label ' Logout ' \
-    --menu 'what do you want to do today?' 0 0 0 \
-    "${TTYDM_CHOICES[@]}" 2> ~/.config/ttydm/last_choice
-then
-    chmod go-rwx ~/.config/ttydm/last_choice
-    TTYDM_DEST=`cat ~/.config/ttydm/last_choice`
+TTYDM_XSESSION=logout
+ttydm_sessid=$(DIALOGRC=${ttydm_dialogrc} dialog --colors --stdout \
+                       --backtitle "$ttydm_maintitle" --title "welcome $USER" \
+                       --ok-label ' Select ' --cancel-label ' Logout ' \
+                       --menu 'what do you want to do today?' 0 0 0 \
+                       "${TTYDM_CHOICES[@]}")
+
+[ ! -n "$ttydm_sessid" -o ! -n "${ttydm_sessions_exec[${ttydm_sessid}]}" ] && \
+    echo "Have a good day" && exit
+
+TTYDM_XSESSION="${ttydm_sessions_exec[${ttydm_sessid}]}"
+
+
+# Load generic profile
+for file in "/etc/profile" "$HOME/.profile"; do
+    if [ -f "$file" ]; then
+        echo "Loading profile from $file" > "$ttydm_startxlog"
+        . "$file"
+    fi
+done
+
+
+if [ "$TTYDM_XSESSION" = 'tty' ]; then
+    clear
+    exec "$SHELL" -l
 fi
 
 
-ttydm_menu "$TTYDM_DEST"
+TTYDM_XINITRC=
+[ "$ttydm_run_xwrapper" = 'yes' -o "$ttydm_run_xwrapper" = 'YES' ] && TTYDM_XINITRC=/usr/lib/ttydm/xsession
+
+
+ttydm_serverargs=("$ttydm_vt" -nolisten tcp)
+
+## Display selection and Auth file, from startx script
+# Automatically determine an unused $DISPLAY
+d=0
+while true ; do
+    [ -e /tmp/.X$d-lock ] || break
+    d=$(($d + 1))
+done
+ttydm_display=":$d"
+unset d
+ttydm_serverargs=(/usr/bin/X "$ttydm_display" "${ttydm_serverargs[@]}")
+
+
+mcookie=$(/usr/bin/mcookie)
+AUTH_TMP=$(mktemp -p /tmp serverauth.XXXXXXXXXX)
+trap "rm -f '$AUTH_TMP' && rm -f /tmp/.X${ttydm_display#:}-lock" HUP INT TERM
+xauth -q -f "$AUTH_TMP" << EOF
+add $ttydm_display . $mcookie
+EOF
+
+echo "$AUTH_TMP" > "$HOME/.config/ttydm/cur_auth_session"
+cp "$AUTH_TMP" "$HOME/.Xauthority"
+ttydm_serverargs=("${ttydm_serverargs[@]}" -auth "$AUTH_TMP")
+
+
+setsid xinit "$TTYDM_XINITRC" "$TTYDM_XSESSION" -- "${ttydm_serverargs[@]}" >> "$ttydm_startxlog" 2>&1
